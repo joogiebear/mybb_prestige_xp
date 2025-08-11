@@ -67,7 +67,7 @@ With Fontawesome
 </span>
 ```
 
-
+---
 ## 🛠 Editing
 
 All front-end HTML is handled via MyBB templates, so no PHP editing is required for visual changes.
