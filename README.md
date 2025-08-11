@@ -20,7 +20,6 @@ Members earn XP for creating threads and posts, level up as they reach milestone
 
 1. **Upload Files**  
    - Upload `prestige_xp.php` to `inc/plugins/`
-   - Upload the included `images/levels/` folder (if you want to use icons — optional)
 
 2. **Activate the Plugin**  
    - In your MyBB ACP, go to **Configuration → Plugins**
@@ -33,11 +32,10 @@ Members earn XP for creating threads and posts, level up as they reach milestone
      - XP per thread
      - Number of levels
      - XP required per level
-     - (Optional) Level icon path pattern (if you use icons)
 
 4. **Templates**  
    - The plugin adds two templates:
-     - `prestige_xp_postbit` — controls how level is shown on postbit
+     - `prestige_xp_postbit` — controls how the level is shown on postbit
      - `prestige_xp_profile` — controls profile level display + XP bar
    - Edit these in **ACP → Templates** to match your theme.
 
@@ -52,17 +50,26 @@ Members earn XP for creating threads and posts, level up as they reach milestone
 
 ---
 
-## 🎨 Customization
+## 🎨 Template Examples
 
-- **Move postbit display** — edit the `prestige_xp_postbit` template and place `{$prestige_xp}` anywhere inside your postbit template (`postbit` or `postbit_classic`).
-- **Add Font Awesome icons** — simply edit the template and insert your `<i class="fa-solid fa-trophy"></i>` before `Level: {$prestige_level}`.
-- **Change colors/styles** — modify the inline styles in the templates or move them to your theme’s CSS file.
+### 1. Basic Level Display (Postbit)
+```html
+<br />
+<span class="smalltext prestige-xp-level" data-level="{$prestige_level}">
+    Level: {$prestige_level}
+</span>
 
----
+With Fontawesome
+<br />
+<span class="smalltext prestige-xp-level" data-level="{$prestige_level}">
+    <i class="fa-solid fa-trophy" style="color: gold; margin-right: 6px;"></i>
+    Level: {$prestige_level}
+</span>
+```
+
 
 ## 🛠 Editing
 
-All front-end HTML is handled via MyBB templates, so no PHP editing is required for visual changes.  
-If you want to change how XP is awarded (e.g., different values for different forums), you can modify the awarding logic inside `prestige_xp.php`.
+All front-end HTML is handled via MyBB templates, so no PHP editing is required for visual changes.
+If you want to change how XP is awarded (e.g., different values for different forums), you can modify the awarding logic inside prestige_xp.php.
 
----
