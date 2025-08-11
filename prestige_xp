@@ -1,0 +1,428 @@
+<?php
+// MyBB Plugin: Prestige XP (Levels + XP Bar)
+// Author: jdmefsir
+// Author Profile: https://community.mybb.com/user-130115.html
+// Compatible: MyBB 1.8.x
+// File: inc/plugins/prestige_xp.php
+
+if(!defined('IN_MYBB')) die('Direct initialization of this file is not allowed.');
+
+$plugins->add_hook('datahandler_post_insert_thread_end', 'prestige_xp_award_on_thread');
+$plugins->add_hook('datahandler_post_insert_post_end', 'prestige_xp_award_on_post');
+$plugins->add_hook('postbit', 'prestige_xp_postbit');
+$plugins->add_hook('member_profile_end', 'prestige_xp_profile');
+
+function prestige_xp_info()
+{
+    return array(
+        'name'          => 'Prestige XP (Levels + XP Bar)',
+        'description'   => 'Awards XP for posts/threads, levels up users, and shows level/progress UI.',
+        'website'       => 'https://community.mybb.com/user-130115.html',
+        'author'        => 'jdmefsir',
+        'authorsite'    => 'https://community.mybb.com/user-130115.html',
+        'version'       => '2.0.1',
+        'compatibility' => '18*'
+    );
+}
+
+function prestige_xp_is_installed()
+{
+    global $db;
+
+    $q = $db->simple_select('settings', 'sid', "name='prestige_xp_enabled'", array('limit' => 1));
+    if((int)$db->fetch_field($q, 'sid') > 0) return true;
+
+    $q = $db->simple_select('settinggroups', 'gid', "name='prestige_xp'", array('limit' => 1));
+    return ((int)$db->fetch_field($q, 'gid') > 0);
+}
+
+function prestige_xp_install()
+{
+    global $db;
+
+    if(!$db->field_exists('xp_points', 'users'))
+    {
+        $db->add_column('users', 'xp_points', "int unsigned NOT NULL DEFAULT 0");
+    }
+    if(!$db->field_exists('xp_level', 'users'))
+    {
+        $db->add_column('users', 'xp_level', "int unsigned NOT NULL DEFAULT 0");
+    }
+
+    $gid = 0;
+    $query = $db->simple_select('settinggroups', 'gid', "name='prestige_xp'");
+    $existing_gid = (int)$db->fetch_field($query, 'gid');
+
+    if($existing_gid > 0)
+    {
+        $gid = $existing_gid;
+        $db->update_query('settinggroups', array(
+            'title'       => 'Prestige XP',
+            'description' => 'Configure XP awards and display toggles.',
+            'disporder'   => 50,
+            'isdefault'   => 0
+        ), "gid={$gid}");
+    }
+    else
+    {
+        $gid = (int)$db->insert_query('settinggroups', array(
+            'name'        => 'prestige_xp',
+            'title'       => 'Prestige XP',
+            'description' => 'Configure XP awards and display toggles.',
+            'disporder'   => 50,
+            'isdefault'   => 0
+        ));
+    }
+
+    $settings = array(
+        'prestige_xp_enabled' => array(
+            'title'       => 'Enable Prestige XP',
+            'description' => 'Globally turn the system on or off.',
+            'optionscode' => 'onoff',
+            'value'       => '1',
+            'disporder'   => 1
+        ),
+        'prestige_xp_per_post' => array(
+            'title'       => 'XP per Reply/Post',
+            'description' => 'XP granted when a user posts a reply.',
+            'optionscode' => 'text',
+            'value'       => '5',
+            'disporder'   => 2
+        ),
+        'prestige_xp_per_thread' => array(
+            'title'       => 'XP per New Thread',
+            'description' => 'XP granted when a user creates a new thread.',
+            'optionscode' => 'text',
+            'value'       => '10',
+            'disporder'   => 3
+        ),
+        'prestige_xp_levels_csv' => array(
+            'title'       => 'XP per Level (CSV)',
+            'description' => 'Comma-separated XP needed to go from Level N â†’ N+1. Example: "100,150,200,300".',
+            'optionscode' => 'textarea',
+            'value'       => '100,200,300,400,500',
+            'disporder'   => 4
+        ),
+        'prestige_xp_show_postbit' => array(
+            'title'       => 'Show on Postbit',
+            'description' => 'If enabled, outputs a small "Level: X" line per post. Place marker <!--PRESTIGE_XP_POST_USER_DETAILS--> in your postbit template to control location.',
+            'optionscode' => 'onoff',
+            'value'       => '1',
+            'disporder'   => 5
+        ),
+        'prestige_xp_show_profile' => array(
+            'title'       => 'Show on Profile',
+            'description' => 'Display a container with "Level X" and a progress bar on member profiles. Place marker <!--PRESTIGE_XP_PROFILE--> in member_profile template to control location (optional).',
+            'optionscode' => 'onoff',
+            'value'       => '1',
+            'disporder'   => 6
+        ),
+    );
+
+    foreach($settings as $name => $def)
+    {
+        $existing = $db->simple_select('settings', 'sid', "name='".$db->escape_string($name)."'");
+        $sid = (int)$db->fetch_field($existing, 'sid');
+        $row = array(
+            'title'       => $def['title'],
+            'description' => $def['description'],
+            'optionscode' => $def['optionscode'],
+            'value'       => $def['value'],
+            'disporder'   => $def['disporder'],
+            'gid'         => $gid
+        );
+        if($sid > 0)
+        {
+            $db->update_query('settings', $row, "sid={$sid}");
+        }
+        else
+        {
+            $row['name'] = $name;
+            $db->insert_query('settings', $row);
+        }
+    }
+
+    if(function_exists('rebuild_settings')) { rebuild_settings(); }
+
+    prestige_xp_create_templates();
+}
+
+function prestige_xp_uninstall()
+{
+    global $db;
+
+    $db->delete_query('settings', "name LIKE 'prestige_xp_%'");
+    $db->delete_query('settinggroups', "name='prestige_xp'");
+
+    if(function_exists('rebuild_settings')) { rebuild_settings(); }
+
+    $db->delete_query('templates', "title IN ('prestige_xp_postbit','prestige_xp_profile')");
+}
+
+function prestige_xp_activate(){}
+function prestige_xp_deactivate(){}
+
+function prestige_xp_create_templates()
+{
+    global $db;
+
+    $postbit_html = '
+<br /><span class="smalltext prestige-xp-level" data-level="{$prestige_level}">Level: {$prestige_level}</span>';
+
+    $profile_html = '
+<div class="prestige-xp tborder" style="margin-top:10px;">
+  <div class="thead">Prestige</div>
+  <div class="trow1">
+    <div class="prestige-xp-title" style="font-weight:bold;margin-bottom:6px;">Level {$prestige_level}</div>
+    <div class="prestige-xp-bar" style="position:relative;height:12px;background:#eee;border-radius:9999px;overflow:hidden;">
+      <span class="prestige-xp-fill" style="position:absolute;left:0;top:0;height:100%;width: {$prestige_percent}%;background:#4ade80;"></span>
+    </div>
+    <div class="prestige-xp-meta" style="font-size:12px;color:#666;margin-top:6px;">
+      {$prestige_current}/{$prestige_required} XP (Total: {$prestige_total})
+    </div>
+  </div>
+</div>';
+
+    $existing = $db->simple_select('templates', 'tid', "title='prestige_xp_postbit' AND sid='-1'");
+    $tid = (int)$db->fetch_field($existing, 'tid');
+    if($tid > 0)
+    {
+        $db->update_query('templates', array('template' => $db->escape_string($postbit_html), 'dateline' => TIME_NOW), "tid={$tid}");
+    }
+    else
+    {
+        $db->insert_query('templates', array(
+            'title'    => 'prestige_xp_postbit',
+            'template' => $db->escape_string($postbit_html),
+            'sid'      => -1,
+            'version'  => '',
+            'dateline' => TIME_NOW
+        ));
+    }
+
+    $existing = $db->simple_select('templates', 'tid', "title='prestige_xp_profile' AND sid='-1'");
+    $tid = (int)$db->fetch_field($existing, 'tid');
+    if($tid > 0)
+    {
+        $db->update_query('templates', array('template' => $db->escape_string($profile_html), 'dateline' => TIME_NOW), "tid={$tid}");
+    }
+    else
+    {
+        $db->insert_query('templates', array(
+            'title'    => 'prestige_xp_profile',
+            'template' => $db->escape_string($profile_html),
+            'sid'      => -1,
+            'version'  => '',
+            'dateline' => TIME_NOW
+        ));
+    }
+}
+
+function prestige_xp_get_levels()
+{
+    global $mybb;
+    $csv = isset($mybb->settings['prestige_xp_levels_csv']) ? trim($mybb->settings['prestige_xp_levels_csv']) : '100,200,300,400,500';
+    $parts = array_filter(array_map('trim', explode(',', $csv)), 'strlen');
+    $levels = array();
+    foreach($parts as $p)
+    {
+        $v = (int)$p;
+        if($v < 1) $v = 1;
+        $levels[] = $v;
+    }
+    if(empty($levels)) $levels = array(100,200,300,400,500);
+    return $levels;
+}
+
+function prestige_xp_calc_progress($xp_total, $current_level = null)
+{
+    $per_level = prestige_xp_get_levels();
+
+    $level = 0;
+    $remaining = (int)$xp_total;
+
+    foreach($per_level as $need)
+    {
+        if($remaining >= $need)
+        {
+            $remaining -= $need;
+            $level++;
+        }
+        else break;
+    }
+
+    $max_level = count($per_level);
+    if($level >= $max_level)
+    {
+        $level = $max_level;
+        $need_next = 0;
+        $current = 0;
+        $percent = 100;
+    }
+    else
+    {
+        $need_next = $per_level[$level];
+        $current = $remaining;
+        $percent = $need_next > 0 ? round(($current / $need_next) * 100, 2) : 0;
+        if($percent > 100) $percent = 100;
+    }
+
+    return array($level, $current, $need_next, $percent);
+}
+
+function prestige_xp_sync_user_level($uid, $xp_total, $existing_level = null)
+{
+    global $db;
+
+    list($new_level,,,$percent) = prestige_xp_calc_progress($xp_total, $existing_level);
+    if($existing_level === null)
+    {
+        $user = get_user($uid);
+        $existing_level = (int)$user['xp_level'];
+    }
+
+    if($new_level !== (int)$existing_level)
+    {
+        $db->update_query('users', array('xp_level' => (int)$new_level), "uid=".(int)$uid);
+    }
+}
+
+function prestige_xp_award_on_thread($posthandler)
+{
+    global $mybb, $db;
+    if(empty($mybb->settings['prestige_xp_enabled'])) return;
+
+    $tid = (int)$posthandler->tid;
+    if($tid <= 0) return;
+
+    $thread = $db->fetch_array($db->simple_select('threads', 'tid,uid,firstpost,visible', "tid={$tid}"));
+    if(empty($thread) || (int)$thread['visible'] != 1) return;
+
+    $uid = (int)$thread['uid'];
+    $xp_gain = (int)$mybb->settings['prestige_xp_per_thread'];
+    if($xp_gain < 0) $xp_gain = 0;
+
+    $db->write_query("
+        UPDATE ".TABLE_PREFIX."users
+        SET xp_points = xp_points + {$xp_gain}
+        WHERE uid = {$uid}
+        LIMIT 1
+    ");
+
+    $user = get_user($uid);
+    $total = (int)$user['xp_points'];
+    prestige_xp_sync_user_level($uid, $total, (int)$user['xp_level']);
+}
+
+function prestige_xp_award_on_post($posthandler)
+{
+    global $mybb, $db;
+
+    if(empty($mybb->settings['prestige_xp_enabled'])) return;
+
+    $pid = (int)$posthandler->pid;
+    if($pid <= 0) return;
+
+    $post = $db->fetch_array($db->simple_select('posts', 'uid,tid,replyto,visible', "pid={$pid}"));
+    if(empty($post) || (int)$post['visible'] != 1) return;
+
+    $uid = (int)$post['uid'];
+    $tid = (int)$post['tid'];
+
+    $thread = $db->fetch_array($db->simple_select('threads', 'firstpost', "tid={$tid}"));
+    if($thread && (int)$thread['firstpost'] === $pid)
+    {
+        return;
+    }
+
+    $xp_gain = (int)$mybb->settings['prestige_xp_per_post'];
+    if($xp_gain < 0) $xp_gain = 0;
+
+    $db->write_query("
+        UPDATE ".TABLE_PREFIX."users
+        SET xp_points = xp_points + {$xp_gain}
+        WHERE uid = {$uid}
+        LIMIT 1
+    ");
+
+    $user = get_user($uid);
+    $total = (int)$user['xp_points'];
+    prestige_xp_sync_user_level($uid, $total, (int)$user['xp_level']);
+}
+
+function prestige_xp_postbit(&$post)
+{
+    global $mybb, $templates;
+
+    if(empty($mybb->settings['prestige_xp_enabled']) || empty($mybb->settings['prestige_xp_show_postbit'])) return $post;
+    if(empty($post['uid'])) return $post;
+
+    if(isset($post['xp_points']) && isset($post['xp_level']))
+    {
+        $xp_total = (int)$post['xp_points'];
+        $xp_level = (int)$post['xp_level'];
+    }
+    else
+    {
+        $user = get_user((int)$post['uid']);
+        $xp_total = (int)$user['xp_points'];
+        $xp_level = (int)$user['xp_level'];
+    }
+
+    list($prestige_level, $prestige_current, $prestige_required, $prestige_percent) =
+        prestige_xp_calc_progress($xp_total, $xp_level);
+
+    eval("\$prestige_html = \"".$templates->get('prestige_xp_postbit')."\";");
+
+    if(isset($post['user_details']) && strpos($post['user_details'], '<!--PRESTIGE_XP_POST_USER_DETAILS-->') !== false)
+    {
+        $post['user_details'] = str_replace('<!--PRESTIGE_XP_POST_USER_DETAILS-->', $prestige_html, $post['user_details']);
+        return $post;
+    }
+
+    if(isset($post['user_details']))
+    {
+        $post['user_details'] .= $prestige_html;
+        return $post;
+    }
+
+    if(isset($post['warninglevel']))
+    {
+        $post['warninglevel'] .= $prestige_html;
+        return $post;
+    }
+
+    if(isset($post['message']))
+    {
+        $post['message'] .= $prestige_html;
+        return $post;
+    }
+
+    return $post;
+}
+
+function prestige_xp_profile()
+{
+    global $mybb, $memprofile, $templates, $profile;
+
+    if(empty($mybb->settings['prestige_xp_enabled']) || empty($mybb->settings['prestige_xp_show_profile'])) return;
+
+    $xp_total = (int)$memprofile['xp_points'];
+    $xp_level = (int)$memprofile['xp_level'];
+
+    list($prestige_level, $prestige_current, $prestige_required, $prestige_percent) =
+        prestige_xp_calc_progress($xp_total, $xp_level);
+    $prestige_total = $xp_total;
+
+    eval("\$prestige_block = \"".$templates->get('prestige_xp_profile')."\";");
+
+    if(strpos($profile, '<!--PRESTIGE_XP_PROFILE-->') !== false)
+    {
+        $profile = str_replace('<!--PRESTIGE_XP_PROFILE-->', $prestige_block, $profile);
+    }
+    else
+    {
+        $profile .= $prestige_block;
+    }
+}
+?>
