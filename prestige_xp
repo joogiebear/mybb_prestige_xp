@@ -1,39 +1,39 @@
 <?php
-// MyBB Plugin: Prestige XP (postbit + stats)
+// MyBB Plugin: Prestige XP (postbit + stats) + AdminCP menu
 // Author: jdmefsir
 // Profile: https://community.mybb.com/user-130115.html
 // Compatible: MyBB 1.8.x
 // File: inc/plugins/prestige_xp.php
 //
-// v2.0.3 (postbit + stats):
-// - Core XP for threads/replies (settings controlled)
-// - Levels from CSV thresholds
-// - Postbit output only (no profile rendering)
-// - Public leaderboard at misc.php?action=prestige
-// - No PluginLibrary dependency
-//
-// Placement tip (postbit):
-//   Add this marker where you want the level text to appear in postbit_user or postbit_author_user template:
-//     <!--PRESTIGE_XP_POST_USER_DETAILS-->
-//   If the marker isn't present, it will be appended to $post['warninglevel'] (under the warning line) as a sensible default.
+// v2.1.2
+// - New: Exclude Forums (CSV fids) setting. No XP awarded in those forums.
+// - AdminCP menu hooks retained (Tools → Prestige XP Tools).
+// - Postbit level + public leaderboard (template-editable About section).
 
 if(!defined('IN_MYBB')) die('Direct initialization of this file is not allowed.');
 
-// Hooks
+// ---- Frontend hooks ----
 $plugins->add_hook('datahandler_post_insert_thread_end', 'prestige_xp_award_on_thread');
 $plugins->add_hook('datahandler_post_insert_post_end', 'prestige_xp_award_on_post');
 $plugins->add_hook('postbit', 'prestige_xp_postbit');
 $plugins->add_hook('misc_start', 'prestige_xp_stats_page');
 
+// ---- AdminCP hooks (menu/handler/permissions) ----
+if(defined('IN_ADMINCP')) {
+    $plugins->add_hook('admin_tools_menu', 'prestige_xp_admin_tools_menu');
+    $plugins->add_hook('admin_tools_action_handler', 'prestige_xp_admin_tools_action_handler');
+    $plugins->add_hook('admin_tools_permissions', 'prestige_xp_admin_tools_permissions');
+}
+
 function prestige_xp_info()
 {
     return array(
         'name'          => 'Prestige XP (postbit + stats)',
-        'description'   => 'Awards XP for threads/posts, shows level on postbit, and adds a public leaderboard at misc.php?action=prestige.',
+        'description'   => 'Awards XP for threads/posts, shows level on postbit, public leaderboard at misc.php?action=prestige, and AdminCP tools.',
         'website'       => 'https://community.mybb.com/user-130115.html',
         'author'        => 'jdmefsir',
         'authorsite'    => 'https://community.mybb.com/user-130115.html',
-        'version'       => '2.0.3',
+        'version'       => '2.1.2',
         'compatibility' => '18*'
     );
 }
@@ -74,13 +74,14 @@ function prestige_xp_install()
         ));
     }
 
-    // core + display settings
+    // core + display + stats settings
     $defs = array(
         array('prestige_xp_enabled','Enable Prestige XP','onoff','1',1,'Turn XP earning and postbit display on/off.'),
         array('prestige_xp_per_post','XP per Reply/Post','text','5',2,'XP granted when a user posts a reply.'),
         array('prestige_xp_per_thread','XP per New Thread','text','10',3,'XP granted when a user creates a new thread.'),
-        array('prestige_xp_levels_csv','XP per Level (CSV)','textarea','100,200,300,400,500',4,'CSV of XP needed to go from Level Nâ†’N+1.'),
-        array('prestige_xp_show_postbit','Show on Postbit','onoff','1',10,'Outputs a small "Level: X" on each post. Use marker <!--PRESTIGE_XP_POST_USER_DETAILS--> in your postbit template to control location.'),
+        array('prestige_xp_levels_csv','XP per Level (CSV)','textarea','100,200,300,400,500',4,'CSV of XP needed to go from Level N→N+1.'),
+        array('prestige_xp_exclude_forums','Exclude Forums (CSV fids)','text','',5,'No XP will be awarded for posts/threads in these forum IDs (comma-separated).'),
+        array('prestige_xp_show_postbit','Show on Postbit','onoff','1',10,'Outputs a small \"Level: X\" on each post. Use marker <!--PRESTIGE_XP_POST_USER_DETAILS--> in your postbit template to control location.'),
         // stats settings
         array('prestige_xp_stats_public','Enable Public Leaderboard','onoff','1',20,'Show the leaderboard at misc.php?action=prestige'),
         array('prestige_xp_stats_perpage','Users Per Page','text','25',21,'How many users to list per page'),
@@ -115,7 +116,7 @@ function prestige_xp_uninstall()
 {
     global $db;
     // Remove settings group and settings
-    $db->delete_query('settings', "name IN ('prestige_xp_enabled','prestige_xp_per_post','prestige_xp_per_thread','prestige_xp_levels_csv','prestige_xp_show_postbit','prestige_xp_stats_public','prestige_xp_stats_perpage','prestige_xp_stats_minposts','prestige_xp_stats_excluded_groups','prestige_xp_stats_allow_guests')");
+    $db->delete_query('settings', "name IN ('prestige_xp_enabled','prestige_xp_per_post','prestige_xp_per_thread','prestige_xp_levels_csv','prestige_xp_exclude_forums','prestige_xp_show_postbit','prestige_xp_stats_public','prestige_xp_stats_perpage','prestige_xp_stats_minposts','prestige_xp_stats_excluded_groups','prestige_xp_stats_allow_guests')");
     $db->delete_query('settinggroups', "name='prestige_xp'");
     if(function_exists('rebuild_settings')) rebuild_settings();
 
@@ -133,8 +134,10 @@ function prestige_xp_create_templates()
     global $db;
 
     // Postbit snippet (simple text line)
-    $postbit_html = '
-<br /><span class="smalltext prestige-xp-level" data-level="{$prestige_level}">Level: {$prestige_level}</span>';
+    $postbit_html = <<<'HTML'
+<br /><span class="smalltext prestige-xp-level" data-level="{$prestige_level}">Level: {$prestige_level}</span>
+HTML;
+
 
     // Upsert master
     $e = $db->simple_select('templates', 'tid', "title='prestige_xp_postbit' AND sid='-1'");
@@ -143,15 +146,26 @@ function prestige_xp_create_templates()
     if($tid > 0) { $db->update_query('templates', $data, "tid={$tid}"); }
     else { $data['title']='prestige_xp_postbit'; $data['sid']=-1; $data['version']=''; $db->insert_query('templates',$data); }
 
-    // Leaderboard page
-    $leaderboard = '
+    // Leaderboard page (includes editable About section directly in the template)
+    $leaderboard = <<<'HTML'
 <html>
 <head>
-<title>{$mybb->settings[\'bbname\']} - Prestige Leaderboard</title>
+<title>{$mybb->settings['bbname']} - Prestige Leaderboard</title>
 {$headerinclude}
 </head>
 <body>
 {$header}
+
+<!-- About Prestige XP (edit this section in the template editor) -->
+<div class="tborder" style="margin-bottom:12px;">
+ <div class="thead">How Prestige XP Works</div>
+ <div class="trow1" style="padding:8px;">
+   <p>Earn XP by posting replies and starting threads. Reach higher levels by accumulating XP. Admins can adjust XP per action and level thresholds in the ACP.</p>
+   <!-- Optional: remove this list if you don't want to show thresholds -->
+   {$levels_list}
+ </div>
+</div>
+
 <div class="tborder">
  <div class="thead">Prestige Leaderboard</div>
  <div class="trow1" style="padding:8px;">
@@ -175,15 +189,19 @@ function prestige_xp_create_templates()
 </div>
 {$footer}
 </body>
-</html>';
+</html>
+HTML;
 
-    $row = '
+
+    $row = <<<'HTML'
 <tr class="{$alt_bg}">
   <td>{$rank}</td>
   <td>{$profile_link}</td>
   <td style="text-align:right;">{$xp_level}</td>
   <td style="text-align:right;">{$xp_points}</td>
-</tr>';
+</tr>
+HTML;
+
 
     foreach(array('prestige_xp_stats_leaderboard' => $leaderboard, 'prestige_xp_stats_row' => $row) as $title => $tpl)
     {
@@ -196,6 +214,27 @@ function prestige_xp_create_templates()
 }
 
 // ---------- helpers ----------
+function prestige_xp_forum_is_excluded($fid)
+{
+    static $map = null;
+    if($map === null)
+    {
+        global $mybb;
+        $map = array();
+        if(!empty($mybb->settings['prestige_xp_exclude_forums']))
+        {
+            $raw = explode(',', $mybb->settings['prestige_xp_exclude_forums']);
+            foreach($raw as $p)
+            {
+                $v = (int)trim($p);
+                if($v > 0) $map[$v] = true;
+            }
+        }
+    }
+    $fid = (int)$fid;
+    return ($fid > 0 && isset($map[$fid]));
+}
+
 function prestige_xp_get_levels()
 {
     global $mybb;
@@ -236,8 +275,11 @@ function prestige_xp_award_on_thread($posthandler)
     $tid = (int)$posthandler->tid;
     if($tid <= 0) return;
 
-    $thread = $db->fetch_array($db->simple_select('threads', 'tid,uid,visible', "tid={$tid}"));
+    $thread = $db->fetch_array($db->simple_select('threads', 'tid,uid,visible,fid', "tid={$tid}"));
     if(empty($thread) || (int)$thread['visible'] != 1) return;
+
+    // forum exclusion
+    if(prestige_xp_forum_is_excluded((int)$thread['fid'])) return;
 
     $uid = (int)$thread['uid'];
     $gain = (int)$mybb->settings['prestige_xp_per_thread'];
@@ -261,8 +303,11 @@ function prestige_xp_award_on_post($posthandler)
     $pid = (int)$posthandler->pid;
     if($pid <= 0) return;
 
-    $post = $db->fetch_array($db->simple_select('posts', 'uid,tid,visible', "pid={$pid}"));
+    $post = $db->fetch_array($db->simple_select('posts', 'uid,tid,visible,fid', "pid={$pid}"));
     if(empty($post) || (int)$post['visible'] != 1) return;
+
+    // forum exclusion
+    if(prestige_xp_forum_is_excluded((int)$post['fid'])) return;
 
     // avoid double count on thread starter
     $tid = (int)$post['tid'];
@@ -344,6 +389,20 @@ function prestige_xp_stats_page()
     require_once MYBB_ROOT.'inc/functions_post.php'; // alt_trow()
     require_once MYBB_ROOT.'inc/functions.php';      // multipage()
 
+    // Auto-generate thresholds list for template
+    $levels_list = '';
+    $levels = prestige_xp_get_levels();
+    if(!empty($levels))
+    {
+        $levels_list = '<div style="margin-top:8px;"><strong>Level thresholds</strong><ul style="margin:6px 0 0 18px;">';
+        $i = 1;
+        foreach($levels as $xp)
+        {
+            $levels_list .= '<li>Level '.$i.': '.(int)$xp.' XP</li>'; $i++;
+        }
+        $levels_list .= '</ul></div>';
+    }
+
     $perpage = max(1, (int)$mybb->settings['prestige_xp_stats_perpage']);
     $minposts = max(0, (int)$mybb->settings['prestige_xp_stats_minposts']);
     $excluded = array();
@@ -401,5 +460,25 @@ function prestige_xp_stats_page()
 
     eval("\$pageout = \"".$templates->get('prestige_xp_stats_leaderboard')."\";");
     output_page($pageout);
+}
+
+// ---------- AdminCP: menu, handlers, permissions ----------
+function prestige_xp_admin_tools_menu(&$sub_menu)
+{
+    $sub_menu[] = array(
+        'id'    => 'prestigexp',
+        'title' => 'Prestige XP Tools',
+        'link'  => 'index.php?module=tools-prestigexp'
+    );
+}
+
+function prestige_xp_admin_tools_action_handler(&$actions)
+{
+    $actions['prestigexp'] = array('active' => 'prestigexp', 'file' => 'prestigexp.php');
+}
+
+function prestige_xp_admin_tools_permissions(&$admin_permissions)
+{
+    $admin_permissions['prestigexp'] = 'Can manage Prestige XP';
 }
 ?>
