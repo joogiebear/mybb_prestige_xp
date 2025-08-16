@@ -1,0 +1,250 @@
+<?php
+/**
+ * Admin Module: Tools & Maintenance -> Prestige XP Tools
+ * Path: admin/modules/tools/prestigexp.php
+ * MyBB 1.8.x
+ * Provides:
+ *  - User XP editor (add/subtract/set), auto-rebuild level
+ *  - Bulk add/subtract by usergroup
+ *  - Maintenance: Rebuild all levels from points; Global reset
+ */
+
+if(!defined('IN_MYBB') || !defined('IN_ADMINCP')) die('Nope.');
+
+$page->add_breadcrumb_item("Prestige XP Tools", "index.php?module=tools-prestigexp");
+
+$sub_tabs = array(
+    "prestigexp_user" => array(
+        "title" => "User XP",
+        "link"  => "index.php?module=tools-prestigexp",
+        "description" => "Lookup a user and adjust their XP or level."
+    ),
+    "prestigexp_bulk" => array(
+        "title" => "Bulk Update",
+        "link"  => "index.php?module=tools-prestigexp&action=bulk",
+        "description" => "Add/subtract XP for everyone in a usergroup."
+    ),
+    "prestigexp_maint" => array(
+        "title" => "Maintenance",
+        "link"  => "index.php?module=tools-prestigexp&action=maintenance",
+        "description" => "Rebuild levels from points or perform a global reset."
+    ),
+);
+
+function prestigexp_get_levels_from_settings()
+{
+    global $mybb;
+    $csv = isset($mybb->settings['prestige_xp_levels_csv']) ? trim($mybb->settings['prestige_xp_levels_csv']) : '100,200,300,400,500';
+    $parts = array_filter(array_map('trim', explode(',', $csv)), 'strlen');
+    $levels = array();
+    foreach($parts as $p){ $v=(int)$p; if($v<1)$v=1; $levels[]=$v; }
+    if(empty($levels)) $levels = array(100,200,300,400,500);
+    return $levels;
+}
+function prestigexp_calc_level($points)
+{
+    $per = prestigexp_get_levels_from_settings();
+    $lvl = 0; $rem = (int)$points;
+    foreach($per as $need){ if($rem >= $need){ $rem -= $need; $lvl++; } else break; }
+    $max = count($per);
+    if($lvl > $max) $lvl = $max;
+    return $lvl;
+}
+
+$action = $mybb->get_input('action');
+global $db;
+
+if($action === 'bulk')
+{
+    $page->output_header("Prestige XP Tools - Bulk Update");
+    $page->output_nav_tabs($sub_tabs, "prestigexp_bulk");
+
+    if($mybb->request_method == 'post')
+    {
+        verify_post_check($mybb->get_input('my_post_key'));
+        $group = (int)$mybb->get_input('usergroup');
+        $amount = (int)$mybb->get_input('amount');
+        $rebuild = (int)$mybb->get_input('rebuild_levels', MyBB::INPUT_INT);
+
+        if($group <= 0)
+        {
+            flash_message("Please select a valid usergroup.", "error");
+            admin_redirect("index.php?module=tools-prestigexp&action=bulk");
+        }
+
+        $db->write_query("UPDATE ".TABLE_PREFIX."users SET xp_points = GREATEST(0, xp_points + {$amount}) WHERE usergroup = {$group}");
+
+        if($rebuild)
+        {
+            $query = $db->simple_select('users', 'uid,xp_points', "usergroup={$group}");
+            while($u = $db->fetch_array($query))
+            {
+                $level = prestigexp_calc_level((int)$u['xp_points']);
+                $db->update_query('users', array('xp_level' => (int)$level), "uid=".(int)$u['uid']);
+            }
+        }
+
+        flash_message("Bulk update complete.", "success");
+        admin_redirect("index.php?module=tools-prestigexp&action=bulk");
+    }
+
+    $form = new Form("index.php?module=tools-prestigexp&action=bulk", "post");
+    echo $form->generate_hidden_field("my_post_key", $mybb->post_code);
+
+    $form_container = new FormContainer("Bulk Add/Subtract XP");
+    $groups = array();
+    $qg = $db->simple_select('usergroups', 'gid,title', '', array('order_by' => 'title'));
+    while($g = $db->fetch_array($qg)){ $groups[(int)$g['gid']] = $g['title']; }
+    $form_container->output_row("Usergroup", "Choose which primary group to affect.", $form->generate_select_box("usergroup", $groups, "", array("id"=>"usergroup")));
+    $form_container->output_row("Amount (can be negative)", "Positive to add XP, negative to subtract.", $form->generate_text_box("amount", "0", array("id"=>"amount")));
+    $form_container->output_row("Rebuild Levels", "Recalculate levels for all affected users after updating points.", $form->generate_yes_no_radio("rebuild_levels", 1));
+    $form_container->end();
+
+    $buttons = array($form->generate_submit_button("Run Bulk Update"));
+    $form->output_submit_wrapper($buttons);
+    $form->end();
+
+    $page->output_footer();
+    exit;
+}
+elseif($action === 'maintenance')
+{
+    $page->output_header("Prestige XP Tools - Maintenance");
+    $page->output_nav_tabs($sub_tabs, "prestigexp_maint");
+
+    if($mybb->request_method == 'post')
+    {
+        verify_post_check($mybb->get_input('my_post_key'));
+        $do = $mybb->get_input('do');
+
+        if($do === 'rebuild')
+        {
+            $rebuilt = 0;
+            $q = $db->simple_select('users', 'uid,xp_points');
+            while($u = $db->fetch_array($q))
+            {
+                $lvl = prestigexp_calc_level((int)$u['xp_points']);
+                $db->update_query('users', array('xp_level' => (int)$lvl), "uid=".(int)$u['uid']);
+                $rebuilt++;
+            }
+            flash_message("Rebuilt levels for {$rebuilt} users.", "success");
+            admin_redirect("index.php?module=tools-prestigexp&action=maintenance");
+        }
+        elseif($do === 'reset')
+        {
+            $confirm = trim($mybb->get_input('confirm_text'));
+            if($confirm !== 'RESET')
+            {
+                flash_message("Type RESET (all caps) to confirm global reset.", "error");
+                admin_redirect("index.php?module=tools-prestigexp&action=maintenance");
+            }
+            $db->write_query("UPDATE ".TABLE_PREFIX."users SET xp_points = 0, xp_level = 0");
+            flash_message("Global reset complete. All users now have 0 XP and Level 0.", "success");
+            admin_redirect("index.php?module=tools-prestigexp&action=maintenance");
+        }
+    }
+
+    $form = new Form("index.php?module=tools-prestigexp&action=maintenance", "post");
+    echo $form->generate_hidden_field("my_post_key", $mybb->post_code);
+    $form_container = new FormContainer("Rebuild Levels");
+    $form_container->output_row("Action", "Recalculate every user's level from their current XP points.", "<strong>This is safe and reversible.</strong>");
+    $form_container->end();
+    echo $form->generate_hidden_field("do", "rebuild");
+    $form->output_submit_wrapper(array($form->generate_submit_button("Rebuild Levels Now")));
+    $form->end();
+
+    echo "<br />";
+
+    $form2 = new Form("index.php?module=tools-prestigexp&action=maintenance", "post");
+    echo $form2->generate_hidden_field("my_post_key", $mybb->post_code);
+    $form_container2 = new FormContainer("Global Reset");
+    $form_container2->output_row("Danger Zone", "This will set <strong>all users</strong> to 0 XP and Level 0. Type <code>RESET</code> to confirm.", $form2->generate_text_box("confirm_text", "", array("placeholder"=>"RESET")));
+    $form_container2->end();
+    echo $form2->generate_hidden_field("do", "reset");
+    $form2->output_submit_wrapper(array($form2->generate_submit_button("Reset All Users", array("class"=>"button button_danger"))));
+    $form2->end();
+
+    $page->output_footer();
+    exit;
+}
+else // default: user xp editor
+{
+    $page->output_header("Prestige XP Tools - User XP");
+    $page->output_nav_tabs($sub_tabs, "prestigexp_user");
+
+    if($mybb->request_method == 'post' && $mybb->get_input('action') === 'save_user')
+    {
+        verify_post_check($mybb->get_input('my_post_key'));
+
+        $uid = (int)$mybb->get_input('uid');
+        $delta = $mybb->get_input('delta');
+        $absolute = $mybb->get_input('absolute');
+        $rebuild = (int)$mybb->get_input('rebuild', MyBB::INPUT_INT);
+
+        $user = get_user($uid);
+        if(!$user)
+        {
+            flash_message("User not found.", "error");
+            admin_redirect("index.php?module=tools-prestigexp");
+        }
+
+        $points = (int)$user['xp_points'];
+        if($absolute !== '' && $absolute !== null)
+        {
+            $points = max(0, (int)$absolute);
+        }
+        if($delta !== '' && $delta !== null)
+        {
+            $points = max(0, $points + (int)$delta);
+        }
+
+        $update = array('xp_points' => (int)$points);
+        if($rebuild)
+        {
+            $update['xp_level'] = (int)prestigexp_calc_level($points);
+        }
+        $db->update_query('users', $update, "uid={$uid}");
+
+        flash_message("User updated.", "success");
+        admin_redirect("index.php?module=tools-prestigexp&username=".urlencode($user['username']));
+    }
+
+    // Search form
+    $form = new Form("index.php?module=tools-prestigexp", "get");
+    $form_container = new FormContainer("Find a User");
+    $form_container->output_row("Username", "Enter a username to load their XP.", $form->generate_text_box("username", $mybb->get_input('username')));
+    $form_container->end();
+    echo $form->generate_hidden_field("module", "tools-prestigexp");
+    echo $form->generate_submit_button("Lookup");
+    $form->end();
+
+    $username = trim($mybb->get_input('username'));
+    if($username !== '')
+    {
+        $user = get_user_by_username($username, array('fields' => '*'));
+        if(!$user)
+        {
+            flash_message("User not found.", "error");
+        }
+        else
+        {
+            $form2 = new Form("index.php?module=tools-prestigexp", "post");
+            echo $form2->generate_hidden_field("my_post_key", $mybb->post_code);
+            echo $form2->generate_hidden_field("uid", (int)$user['uid']);
+            $form_container2 = new FormContainer("Edit XP for: ".htmlspecialchars_uni($user['username']));
+            $form_container2->output_row("Current XP", "", "<strong>".(int)$user['xp_points']."</strong>");
+            $form_container2->output_row("Current Level", "", "<strong>".(int)$user['xp_level']."</strong>");
+            $form_container2->output_row("Add/Subtract XP", "Use negative to subtract.", $form2->generate_text_box("delta", "0"));
+            $form_container2->output_row("Set Absolute XP", "Leave blank to skip.", $form2->generate_text_box("absolute", ""));
+            $form_container2->output_row("Rebuild Level", "Recalculate level after updating points.", $form2->generate_yes_no_radio("rebuild", 1));
+            $form_container2->end();
+            echo $form2->generate_hidden_field("action", "save_user");
+            $form2->output_submit_wrapper(array($form2->generate_submit_button("Save Changes")));
+            $form2->end();
+        }
+    }
+
+    $page->output_footer();
+    exit;
+}
+?>
